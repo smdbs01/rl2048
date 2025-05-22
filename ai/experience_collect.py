@@ -25,6 +25,8 @@ class Transition:
         The state of the game after the action, length 16 (4x4 board)
     next_state: np.uint64
         The next state of the game, length 16 (4x4 board)
+    delta : float
+        The temporal difference error calculated from the transition
     score : int
         The total score obtained in the trajectory after this transition
     done : bool
