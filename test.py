@@ -5,7 +5,7 @@ from pathlib import Path
 import numba
 import numpy as np
 
-from ai.experience_collect import BestActionExperienceCollector
+from ai.experience_collect import BestActionTDTrainer
 from ai.ntuple_utils import TUPLES
 from env.bitboard import BitBoard
 from main import load_agent
@@ -53,7 +53,7 @@ if __name__ == "__main__":
         exit(1)
 
     print(f"Loaded agent with {n_games} games played.")
-    experience_collector = BestActionExperienceCollector(env=env, ntuple_network=agent)
+    experience_collector = BestActionTDTrainer(env=env, ntuple_network=agent)
 
     start_time = time.time()
 

@@ -40,8 +40,13 @@ class NTupleNetwork:
         initial_weight : float, optional
             The initial weight for the n-tuples, by default 0
         """
-        self.tuples = np.array(tuples, dtype=np.int32)
-        self.m, self.n = self.tuples.shape
+        self.m = len(tuples)
+        self.n = max([len(t) for t in tuples])
+        self.tuples = np.full((self.m, self.n), -1, dtype=np.int32)
+        self.lengths = np.array([len(t) for t in tuples], dtype=np.int32)
+
+        for i, t in enumerate(tuples):
+            self.tuples[i, : len(t)] = t
 
         if lut is None:
             self.lut = np.full((self.m, 16**self.n), initial_weight, dtype=np.float32)
@@ -61,42 +66,33 @@ class NTupleNetwork:
         self._precompute_jit()
 
     def _precompute_jit(self) -> None:
-        self._get_tuple_index_jit, self._v_from_bb_jit = self._build_jit_function()
-        _ = self._get_tuple_index_jit(np.uint64(0), np.zeros(self.n, dtype=np.int32))
+        self._v_from_bb_jit = self._build_jit_function()
         _ = self._v_from_bb_jit(np.uint64(0))
 
     def _build_jit_function(self):
         tuples = self.tuples
         lut = self.lut
-        n = self.n
+        m = self.m
+        lengths = self.lengths
         TILE_BITS = self.TILE_BITS
         TILE_MASK = self.TILE_MASK
 
         @njit(parallel=True)
-        def _get_tuple_index_jit(bb: np.uint64, t: np.ndarray) -> int:
-            index = 0
-            for j in prange(n):
-                pos = t[j]
-                shift = pos * TILE_BITS
-                tile = (bb >> shift) & TILE_MASK
-                index += tile * (1 << (j * TILE_BITS))
-            return index
-
-        @njit(parallel=True)
         def _v_jit(bb: np.uint64) -> float:
             v = 0.0
-            nt = tuples.shape[0]
-            for i in prange(nt):
+            for i in prange(m):
                 idx = 0
-                for j in prange(n):
+                n = lengths[i]
+                for j in range(n):
                     pos = tuples[i, j]
                     shift = pos * TILE_BITS
                     tile = (bb >> shift) & TILE_MASK
                     idx += tile * (1 << (j * TILE_BITS))
-                v += lut[i, idx]
+                w = lut[i, idx]
+                v += w
             return v
 
-        return _get_tuple_index_jit, _v_jit
+        return _v_jit
 
     def V(self, bb: np.uint64) -> float:
         """
@@ -112,7 +108,8 @@ class NTupleNetwork:
         float
             The value of the state
         """
-        return self._v_from_bb_jit(bb)
+        res = self._v_from_bb_jit(bb)
+        return res
 
     def _get_best_action(self, bb: np.uint64) -> tuple[Action, np.uint64, int, float]:
         """
@@ -150,11 +147,9 @@ class NTupleNetwork:
 
         return best_action, best_bb, best_score, best_board_value
 
-    def _calculate_td_error(
-        self, s_after: np.uint64, s_next: np.uint64, gamma: float = 1
-    ) -> float:
+    def calculate_td_error(self, s_after: np.uint64, s_next: np.uint64) -> float:
         """
-        Calculate the TD error for the given states and gamma.
+        Calculate the TD error for the given states.
 
         Delta = r_{t+1} + V(s'_{t+1}) - V(s'_{t})
 
@@ -166,9 +161,6 @@ class NTupleNetwork:
         s_next : np.uint64
             The next state (board after the action and a new tile is added)
 
-        gamma : float
-            The discount factor, by default 1
-
         Returns
         -------
         float
@@ -178,15 +170,15 @@ class NTupleNetwork:
         _, _, r_next, v_next_after = self._get_best_action(s_next)
         v_after = self.V(s_after)
 
-        return r_next + gamma * v_next_after - v_after
+        return r_next + v_next_after - v_after
 
     @staticmethod
-    @njit(parallel=True)
+    @njit
     def _update_weights_jit(
         lut: np.ndarray,
         tuples: np.ndarray,
+        lengths: np.ndarray,
         s_after: np.uint64,
-        s_next: np.uint64,
         delta: float,
         alpha: float,
         E: np.ndarray,
@@ -195,9 +187,10 @@ class NTupleNetwork:
         TILE_MASK: np.uint64,
         is_tc: bool,
     ):
-        m, n = tuples.shape
+        m, _ = tuples.shape
         for i in prange(m):
-            idx = np.uint64(0)
+            idx = 0
+            n = lengths[i]
             for j in range(n):
                 pos = tuples[i, j]
                 shift = pos * TILE_BITS
@@ -207,6 +200,8 @@ class NTupleNetwork:
             beta = 1.0
             if is_tc:
                 beta = np.abs(E[i, idx]) / A[i, idx] if A[i, idx] != 0 else 1
+                if beta > 10:
+                    print(f"beta is too large: {beta}")
             lut[i, idx] += delta * beta * alpha / m
             if is_tc:
                 E[i, idx] += delta
@@ -215,20 +210,20 @@ class NTupleNetwork:
     def update_weights(
         self,
         s_after: np.uint64,
-        s_next: np.uint64,
-        alpha: float = 0.01,
+        cumulative_delta: float,
+        alpha: float = 0.1,
         is_tc: bool = False,
     ):
-        # Calculate the TD error
-        delta = self._calculate_td_error(s_after, s_next)
-
+        if not np.isfinite(cumulative_delta):
+            print(f"cumulative_delta is not finite: {cumulative_delta}")
+            return
         # Update the weights
         NTupleNetwork._update_weights_jit(
             self.lut,
             self.tuples,
+            self.lengths,
             s_after,
-            s_next,
-            delta,
+            cumulative_delta,
             alpha,
             self.E,
             self.A,

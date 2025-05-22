@@ -1,10 +1,8 @@
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from time import sleep
-from typing import Optional
 
 import numpy as np
-from numba import njit
 
 from ai.ntuplenetwork import NTupleNetwork
 from env.env import Action, Env
@@ -38,6 +36,7 @@ class Transition:
     reward: float
     after_state: np.uint64
     next_state: np.uint64
+    delta: float
     score: int
     done: bool
 
@@ -62,9 +61,9 @@ class Trajectory:
     transitions: list[Transition]
 
 
-class ExperienceCollector(ABC):
+class Trainer(ABC):
     """
-    Abstract base class for experience collectors.
+    Abstract class for a trainer.
 
     Attributes
     ----------
@@ -72,15 +71,32 @@ class ExperienceCollector(ABC):
         The environment to collect experiences from
     ntuple_network : NTupleNetwork
         The n-tuple network to use for experience collection
+    alpha : float
+        The learning rate for the agent
     """
 
-    def __init__(self, env: Env, ntuple_network: NTupleNetwork) -> None:
+    def __init__(
+        self, env: Env, ntuple_network: NTupleNetwork, alpha: float = 0.1
+    ) -> None:
         self.env = env
         self.agent = ntuple_network
+        self.alpha = alpha
+
+    def set_alpha(self, alpha: float) -> None:
+        """
+        Set the learning rate for the agent.
+
+        Parameters
+        ----------
+        alpha : float
+            The learning rate for the agent
+        """
+        self.alpha = alpha
 
     def collect(self) -> Trajectory:
         """
         Collect a trajectory from the environment.
+        Update the weights of the agent based on the collected trajectory.
 
         Returns
         -------
@@ -88,7 +104,7 @@ class ExperienceCollector(ABC):
             The trajectory of the game
         """
         state = self._reset_env()
-        transitions = []
+        transitions: list[Transition] = []
         max_tile = 0
         score = 0
         while True:
@@ -98,21 +114,27 @@ class ExperienceCollector(ABC):
             max_tile = max(max_tile, self.env.get_max_tile())
             score += reward
 
+            delta = self.agent.calculate_td_error(after_state, next_state)
+
             transition = Transition(
                 state=state,
                 action=action,
                 reward=reward,
                 after_state=after_state,
                 next_state=next_state,
+                delta=delta,
                 score=score,
                 done=done,
             )
-            transitions.append(transition)
 
             if done:
                 break
 
+            transitions.append(transition)  # don't append the failing transition
+
             state = next_state
+
+        self.update_weights(transitions)
 
         return Trajectory(max_tile=max_tile, score=score, transitions=transitions)
 
@@ -156,6 +178,7 @@ class ExperienceCollector(ABC):
                 reward=reward,
                 after_state=after_state,
                 next_state=next_state,
+                delta=0,
                 score=score,
                 done=done,
             )
@@ -239,10 +262,23 @@ class ExperienceCollector(ABC):
         """
         pass
 
+    @abstractmethod
+    def update_weights(self, transitions: list[Transition]) -> None:
+        """
+        Update the weights of the agent based on the collected transitions.
 
-class BestActionExperienceCollector(ExperienceCollector):
+        Parameters
+        ----------
+        transitions : list[Transition]
+            The list of transitions to update the weights with
+        """
+        pass
+
+
+class BestActionTDTrainer(Trainer):
     """
-    Experience collector that collects experiences based on the best action.
+    Trainer that collects experiences based on the best action.
+    This class updates the weights of the agent based on the collected experiences and calculates the delta using N-step TD.
 
     Attributes
     ----------
@@ -250,10 +286,38 @@ class BestActionExperienceCollector(ExperienceCollector):
         The environment to collect experiences from
     ntuple_network : NTupleNetwork
         The n-tuple network to use for experience collection
+    alpha : float
+        The learning rate for the agent
+    td_h : int
+        The number of steps to look ahead for TD calculation
+    td_lambda : float
+        The decay factor for the TD error
     """
 
-    def __init__(self, env: Env, ntuple_network: NTupleNetwork) -> None:
-        super().__init__(env, ntuple_network)
+    def __init__(
+        self,
+        env: Env,
+        ntuple_network: NTupleNetwork,
+        alpha: float = 0.1,
+        td_h: int = 3,
+        td_lambda: float = 0.5,
+    ) -> None:
+        super().__init__(env, ntuple_network, alpha)
+
+        self.td_h = td_h
+        self.td_lambda = td_lambda
+        self.is_tc = False
+
+    def set_tc(self, is_tc: bool) -> None:
+        """
+        Set the Temporal Coherence training flag.
+
+        Parameters
+        ----------
+        is_tc : bool
+            Whether to use Temporal Coherence training or not
+        """
+        self.is_tc = is_tc
 
     def _reset_env(self) -> np.uint64:
         """
@@ -325,143 +389,47 @@ class BestActionExperienceCollector(ExperienceCollector):
 
         return after_state, next_state, reward, done
 
-
-class BestActionExperienceCollector_SS_TD(BestActionExperienceCollector):
-    """
-    Experience collector that collects experiences based on the best action,
-    but add the ability to skip the start of the game and tile downgrading.
-
-    Attributes
-    ----------
-    env : Env
-        The environment to collect experiences from
-    ntuple_network : NTupleNetwork
-        The n-tuple network to use for experience collection
-    """
-
-    def __init__(self, env: Env, ntuple_network: NTupleNetwork) -> None:
-        super().__init__(env, ntuple_network)
-
-        self.last_trajectory: Optional[Trajectory] = None
-        self.is_downgrade = False
-        self.is_skip_start = False
-        self.score = 0
-        self.last_trajectory_length = 0
-
-    def collect(self) -> Trajectory:
-        state = self._reset_env()
-        transitions = []
-        max_tile = 0
-        score = self.score
-        while True:
-            action = self._select_action(state)
-            after_state, next_state, reward, done = self._step_env(action)
-
-            score += reward
-            max_tile = max(max_tile, self.env.get_max_tile())
-
-            transition = Transition(
-                state=state,
-                action=action,
-                reward=reward,
-                after_state=after_state,
-                next_state=next_state,
-                score=score,
-                done=done,
-            )
-            transitions.append(transition)
-
-            if done:
-                break
-
-            state = next_state
-
-            # if max_tile >= 12:
-            #     self.is_downgrade = True
-
-        trajectory = Trajectory(max_tile=max_tile, score=score, transitions=transitions)
-        if score > 60000 and len(transitions) > 100:
-            self.is_skip_start = True
-        self.last_trajectory = trajectory  # Store the last trajectory
-        self.is_downgrade = False
-        self.score = 0
-        return trajectory
-
-    def _reset_env(self) -> np.uint64:
+    def update_weights(self, transitions: list[Transition]) -> None:
         """
-        Reset the environment and return the initial state.
-
-        Returns
-        -------
-        np.uint64
-            The initial state of the environment
-        """
-        if self.is_skip_start and self.last_trajectory is not None:
-            # Start from the middle of the last trajectory
-            idx = len(self.last_trajectory.transitions) // 2
-            initial_bb = self.last_trajectory.transitions[idx].next_state
-            self.score = self.last_trajectory.transitions[idx].score
-            self.env.reset(initial_bb)
-
-            self.last_trajectory_length = len(self.last_trajectory.transitions) - idx
-        else:
-            self.env.reset(None)
-            self.score = 0
-            self.last_trajectory_length = 0
-
-        self.is_skip_start = False
-        return self.env.get_bb()
-
-    def _select_action(self, state: np.uint64) -> Action:
-        """
-        Select an action based on the current state.
+        Update the weights of the agent based on the collected transitions.
 
         Parameters
         ----------
-        state : np.uint64
-            The current state of the environment
-
-        Returns
-        -------
-        Action
-            The selected action
+        transitions : list[Transition]
+            The list of transitions to update the weights with
         """
-        # tile downgrade
-        bb = state
-        if self.is_downgrade:
-            bb = self._downgrade_tiles_jit(state)
-        a, _, _, _ = self.agent._get_best_action(bb)
-        return a
 
-    @staticmethod
-    @njit
-    def _downgrade_tiles_jit(bb: np.uint64) -> np.uint64:
-        tiles = np.empty(16, dtype=np.int32)
-        for i in range(16):
-            tiles[i] = int((bb >> np.uint64(4 * i)) & np.uint64(0xF))
+        buffer = []
 
-        # find largest tile
-        max_tile = 0
-        for i in range(16):
-            if tiles[i] > max_tile:
-                max_tile = tiles[i]
+        for idx, tr in enumerate(transitions):
+            buffer.append((tr.after_state, tr.delta))
 
-        # find smallest missing tile
-        present = np.zeros(max_tile + 2, dtype=np.bool_)
-        for t in tiles:
-            if t > 0:
-                present[t] = True
+            if idx >= self.td_h:
+                cumulative_delta = 0
+                for i in range(self.td_h + 1):
+                    if (idx - self.td_h + i) < len(buffer):
+                        delta = buffer[idx - self.td_h + i][1]
+                        cumulative_delta += self.td_lambda**i * delta
 
-        m = 1
-        while m < present.size and present[m]:
-            m += 1
+                oldest_after_state = buffer[idx - self.td_h][0]
+                self.agent.update_weights(
+                    s_after=oldest_after_state,
+                    cumulative_delta=cumulative_delta,
+                    alpha=self.alpha,
+                    is_tc=self.is_tc,
+                )
 
-        for i in range(16):
-            if tiles[i] > m:
-                tiles[i] -= 1
+        # Update the weights for the last h-1 transitions
+        for k in range(max(0, len(buffer) - self.td_h), len(buffer)):
+            cumulative_delta = 0
+            for i in range(self.td_h + 1):
+                if k + i < len(buffer):
+                    delta = buffer[k + i][1]
+                    cumulative_delta += self.td_lambda**i * delta
 
-        new_bb = np.uint64(0)
-
-        for i in range(16):
-            new_bb |= np.uint64(tiles[i]) << np.uint64(4 * i)
-        return new_bb
+            self.agent.update_weights(
+                s_after=buffer[k][0],
+                cumulative_delta=cumulative_delta,
+                alpha=self.alpha,
+                is_tc=self.is_tc,
+            )

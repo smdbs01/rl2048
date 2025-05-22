@@ -10,7 +10,7 @@ import numba
 import numpy as np
 from tqdm import tqdm
 
-from ai.experience_collect import BestActionExperienceCollector
+from ai.experience_collect import BestActionTDTrainer
 from ai.ntuple_utils import TUPLES, get_symmetric_tuples
 from ai.ntuplenetwork import NTupleNetwork
 from env.bitboard import BitBoard
@@ -147,13 +147,12 @@ def load_agent(
                 return n_games, agent
         else:
             print("Loading the latest agent...")
-            saves = list(model_dir.glob("*.pkl"))
+            all_models = list(model_dir.glob("*.pkl"))
+            saves = [s for s in all_models if tuples_name in s.name]
             if not saves:
                 print("No saved agents found. Creating a new agent.")
                 return 0, None
-            save = max(
-                [s for s in saves if tuples_name in s.name], key=os.path.getctime
-            )
+            save = max(saves, key=os.path.getctime)
             print(f"Loading {save}...")
             with open(save, "rb") as f:
                 n_games, tuples_name, lut = pickle.load(f)
@@ -205,10 +204,9 @@ if __name__ == "__main__":
         history = {k: [] for k in HISTORY_FIELD}
         n_games = 0
 
-    experience_collector = BestActionExperienceCollector(env, agent)
+    trainer = BestActionTDTrainer(env, agent, alpha=LEARNING_RATE)
 
     print("Starting training...")
-    alpha = 0.1
     is_tc = False
     try:
         for update in range(n_games // N_EPISODES, N_ITERATIONS):
@@ -217,7 +215,9 @@ if __name__ == "__main__":
 
             if update == (N_ITERATIONS - TC_RATIO * N_ITERATIONS):
                 is_tc = True
-                alpha = 1
+                trainer.set_alpha(1.0)  # set alpha to 1.0 for TC training
+                trainer.set_tc(True)
+
                 print("Starting Temporal Coherence training")
 
             t = range(N_EPISODES)
@@ -226,19 +226,14 @@ if __name__ == "__main__":
 
             start_time = time.time()
             for episode in t:
-                trajectory = experience_collector.collect()
+                trajectory = trainer.collect()
 
                 if TQDM and type(t) is tqdm:
                     t.set_postfix(
                         {
                             "max_tile": trajectory.max_tile,
                             "score": trajectory.score,
-                            "alpha": alpha,
                         }
-                    )
-                for tr in trajectory.transitions[:-1][::-1]:
-                    agent.update_weights(
-                        tr.after_state, tr.next_state, alpha=alpha, is_tc=is_tc
                     )
 
                 max_tiles.append(trajectory.max_tile)
