@@ -142,8 +142,12 @@ def load_agent(
                 print(f"File {save} does not exist. Creating a new agent.")
                 return 0, None
             with open(save, "rb") as f:
-                n_games, tuples_name, lut = pickle.load(f)
-                agent = NTupleNetwork(tuples=get_symmetric_tuples(tuples_name), lut=lut)
+                n_games, tuples_name, lut, tc_tables = pickle.load(f)
+                agent = NTupleNetwork(
+                    tuples=get_symmetric_tuples(tuples_name),
+                    lut=lut,
+                    tc_tables=tc_tables,
+                )
                 return n_games, agent
         else:
             print("Loading the latest agent...")
@@ -155,8 +159,12 @@ def load_agent(
             save = max(saves, key=os.path.getctime)
             print(f"Loading {save}...")
             with open(save, "rb") as f:
-                n_games, tuples_name, lut = pickle.load(f)
-                agent = NTupleNetwork(tuples=get_symmetric_tuples(tuples_name), lut=lut)
+                n_games, tuples_name, lut, tc_tables = pickle.load(f)
+                agent = NTupleNetwork(
+                    tuples=get_symmetric_tuples(tuples_name),
+                    lut=lut,
+                    tc_tables=tc_tables,
+                )
                 return n_games, agent
     print("Loading is disabled. Creating a new agent.")
     return 0, None
@@ -181,7 +189,7 @@ def save_agent(
     name = OUTPUT_NAME if OUTPUT_NAME else f"{agent.__class__.__name__}"
     model_filename = MODEL_DIR / f"{name}_{tuples_name}_{n_games}games_model.pkl"
     with open(model_filename, "wb") as f:
-        pickle.dump((n_games, tuples_name, agent.lut), f)
+        pickle.dump((n_games, tuples_name, agent.lut, (agent.E, agent.A)), f)
     print(f"Agent saved to {model_filename}")
 
     history_filename = HISTORY_DIR / f"{name}_{tuples_name}_{n_games}games_history.pkl"
