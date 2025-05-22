@@ -32,6 +32,13 @@ parser.add_argument(
     help="Learning rate for the agent",
 )
 parser.add_argument(
+    "--initial-weight",
+    "-iw",
+    type=float,
+    default=0.0,
+    help="Initial weight for the N-tuple network",
+)
+parser.add_argument(
     "--tc-ratio",
     "-tc",
     type=float,
@@ -91,6 +98,7 @@ args = parser.parse_args()
 SEED: int = args.seed
 TUPLES_NAME: str = args.tuples
 LEARNING_RATE: float = args.learning_rate
+INITIAL_WEIGHT: float = args.initial_weight
 TC_RATIO: float = args.tc_ratio
 N_ITERATIONS: int = args.n_iterations
 N_EPISODES: int = args.n_episodes
@@ -208,7 +216,7 @@ if __name__ == "__main__":
     history = {k: [] for k in HISTORY_FIELD}
     if agent is None:
         tuples = get_symmetric_tuples(TUPLES_NAME)
-        agent = NTupleNetwork(tuples, initial_weight=10_000)
+        agent = NTupleNetwork(tuples, initial_weight=INITIAL_WEIGHT)
         history = {k: [] for k in HISTORY_FIELD}
         n_games = 0
 
